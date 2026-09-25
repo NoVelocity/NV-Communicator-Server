@@ -1,0 +1,9 @@
+[project]
+name = "nv-communicator-server"
+version = "1.0"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "websockets"
+]
