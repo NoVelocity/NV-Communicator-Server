@@ -67,14 +67,18 @@ class CommunicatorServer:
         self.app = FastAPI()
         self.manager = ConnectionManager()
 
-        self.app.websocket("/{client_id}")(self.ws_handler)
+        self.app.websocket("/{client_id}")(self._ws_handler)
+        self.app.get("/")(self._get_all_active_clients)
 
         self.active_tasks: List[DeliveryTask] = []
 
         print("Communicator server ready!")
         pass
 
-    async def parse_data(self, data, client_id):
+    async def _get_all_active_clients(self):
+        return [client.client_id for client in self.manager.active_connections]
+
+    async def _parse_data(self, data, client_id):
         if "destination" in data:
             current_task = DeliveryTask(str(uuid.uuid4()), client_id, data["destination"], data["payload"])
 
@@ -85,12 +89,12 @@ class CommunicatorServer:
                     break
             if not has_client:
                 current_task.result_to_source = "ERR_SRV__NO_ACTIVE_CLIENT_WITH_CURRENT_DESTINATION_ID"
-                await self.send_result_to_source(current_task)
+                await self._send_result_to_source(current_task)
                 return
 
             self.active_tasks.append(current_task)
             current_task.timeout_handle = asyncio.create_task(self._watch_timeout(current_task))
-            await self.send_payload_to_destination(current_task)
+            await self._send_payload_to_destination(current_task)
         if "result" in data:
             current_task: DeliveryTask | None = None
             for task in self.active_tasks:
@@ -100,13 +104,13 @@ class CommunicatorServer:
             if current_task is None:
                 stale_task = DeliveryTask(data["id"], "None", client_id, "")
                 stale_task.result_to_destination_from_server = "ERR_SRV__NO_DELIVERY_TASK_WITH_CURRENT_ID"
-                await self.send_result_to_destination(stale_task)
+                await self._send_result_to_destination(stale_task)
                 return
 
             self._finish_task(current_task)
 
             current_task.result_to_destination_from_server = "ok"
-            await self.send_result_to_destination(current_task)
+            await self._send_result_to_destination(current_task)
 
             current_task.result_to_server_from_destination = data["result"]
 
@@ -114,7 +118,7 @@ class CommunicatorServer:
                 current_task.result_to_source = "ok"
             else:
                 current_task.result_to_source = "ERR_DESTINATION__" + current_task.result_to_server_from_destination
-            await self.send_result_to_source(current_task)
+            await self._send_result_to_source(current_task)
 
     async def _watch_timeout(self, task: DeliveryTask):
         try:
@@ -127,7 +131,7 @@ class CommunicatorServer:
 
         self.active_tasks.remove(task)
         task.result_to_source = "ERR_SRV__DESTINATION_TIMEOUT"
-        await self.send_result_to_source(task)
+        await self._send_result_to_source(task)
 
     def _finish_task(self, task: DeliveryTask):
         if task.timeout_handle is not None:
@@ -144,26 +148,26 @@ class CommunicatorServer:
 
             if task.destination_id == client_id:
                 task.result_to_source = "ERR_SRV__DESTINATION_DISCONNECTED"
-                await self.send_result_to_source(task)
+                await self._send_result_to_source(task)
 
-    async def ws_handler(self, websocket: WebSocket, client_id: str):
+    async def _ws_handler(self, websocket: WebSocket, client_id: str):
         await self.manager.connect(websocket, client_id)
         try:
             while True:
                 data = await websocket.receive_text()
-                await self.parse_data(json.loads(data), client_id)
+                await self._parse_data(json.loads(data), client_id)
         except WebSocketDisconnect:
             self.manager.disconnect(websocket)
             await self._handle_disconnect(client_id)
 
-    async def send_payload_to_destination(self, task: DeliveryTask):
+    async def _send_payload_to_destination(self, task: DeliveryTask):
         await self.manager.send_message_by_client_id(
             json.dumps({"id": task.task_id, "source": task.source_id, "payload": task.payload}), task.destination_id)
 
-    async def send_result_to_destination(self, task: DeliveryTask):
+    async def _send_result_to_destination(self, task: DeliveryTask):
         await self.manager.send_message_by_client_id(
             json.dumps({"id": task.task_id, "result": task.result_to_destination_from_server}), task.destination_id)
 
-    async def send_result_to_source(self, task: DeliveryTask):
+    async def _send_result_to_source(self, task: DeliveryTask):
         await self.manager.send_message_by_client_id(json.dumps({"id": task.task_id, "result": task.result_to_source}),
-            task.source_id)
+                                                     task.source_id)
